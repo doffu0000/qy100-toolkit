@@ -4,7 +4,7 @@ venv/
 __pycache__/
 *.py[cod]
 
-midi/
+qy100-syx/midi/
 training-data/
 dumps/*
 !dumps/README.md
