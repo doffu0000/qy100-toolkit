@@ -6,6 +6,7 @@ __pycache__/
 
 qy100-syx/midi/
 training-data/
+local/
 dumps/*
 !dumps/README.md
 !dumps/3*.syx
