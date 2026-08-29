@@ -4,6 +4,11 @@ Herramientas de respaldo, análisis y autoría SysEx para el **Yamaha QY100**.
 Permiten conservar la SRAM del equipo, inspeccionar volcados y construir patrones
 o canciones que el secuenciador reproduce sin un computador conectado.
 
+> **Licencia**: el código va bajo [MIT](../LICENSE) y la documentación bajo
+> [CC BY 4.0](../LICENSE-DOCS). Las tablas derivadas de la documentación de
+> Yamaha y el material de terceros están identificados en [NOTICE](../NOTICE).
+
+
 El proyecto comenzó como una utilidad de ingeniería inversa. El formato de
 patrones ya está resuelto y verificado contra hardware; el código actual puede
 leer y escribir eventos, pistas multibloque, cabeceras, secciones, voces, mezcla,
@@ -30,12 +35,21 @@ en el dispositivo y el decodificador del Data Filer oficial de Yamaha.
 
 | Archivo | Para qué |
 | --- | --- |
-| [`syx.py`](syx.py) | La herramienta principal: volcar, inspeccionar, restaurar, generar, buscar voces. |
+| [`syx.py`](syx.py) | La herramienta principal: volcar, inspeccionar, restaurar, generar pistas y estilos enteros, buscar voces y frases. |
 | [`tocar.py`](tocar.py) | Toca el generador de tonos en tiempo real. **Aquí el maestro del reloj somos nosotros**, al revés que en `qy100-arp`. No escribe nada en el equipo. |
 | [`exportar_midi.py`](exportar_midi.py) | Escribe un `.mid` estándar. Para mover notas a un DAW **le gana a la transferencia**: exacto, instantáneo, y no pierde bloques en silencio. |
 | [`extraer_rom.py`](extraer_rom.py) | Decodifica la ROM del firmware; de aquí salió `voces.json`. |
 | [`extraer_frases.py`](extraer_frases.py) | Extrae las 4.285 frases preset del Data List. Se valida solo. |
-| [`test_protocol.py`](test_protocol.py) | 117 comprobaciones, sin hardware. |
+| [`test_protocol.py`](test_protocol.py) | 175 comprobaciones, sin hardware. Unas cuantas leen `dumps/`, asi que el total baja si el conjunto de volcados es parcial. |
+| [`test_regresiones.py`](test_regresiones.py) | Reintroduce cada defecto conocido y exige que la suite lo cace. |
+| [`medir_volcados.py`](medir_volcados.py) | Recuenta sobre los volcados las cifras que citan los documentos. |
+| [`test_generos.py`](test_generos.py) | 102 comprobaciones sobre los motores de género (menos si `midi/` va incompleto: unas cuantas leen los loops). |
+| [`importar_tribe.py`](importar_tribe.py) | Traduce un loop de TRIBE Player al kit XG, con el criterio de cada golpe escrito al lado. |
+| [`medir_audio.py`](medir_audio.py) | ¿Binaria o ternaria? — sobre una grabación. Lleva `--autotest` con clicks sintéticos; si falla, ninguna medición suya vale. |
+| [`medir_loops.py`](medir_loops.py) | Lo mismo sobre loops MIDI: recalcula toda cifra de loop que citen los documentos. |
+| [`pesar_estilos.py`](pesar_estilos.py) | Pesa cada estilo en bloques y en KB de memoria del aparato. |
+| [`pantalla.py`](pantalla.py) | Escribe texto y mapas de bits de 16x16 en la pantalla, por XG Display Data. |
+| [`barrer_categorias.py`](barrer_categorias.py) | Barre valores de una referencia a frase preset **escribiendo y oyendo**, sin volcar. Guarda el método aunque su lectura acabara siendo el panel. |
 | `probe.py` | Sondas sueltas de ingeniería inversa. |
 
 Datos de referencia, todos generados y verificados, no transcritos a mano:
@@ -68,12 +82,16 @@ Antes de transferir:
 
 - `HOST SELECT = MIDI`.
 - El secuenciador debe estar detenido y en la pantalla principal.
-- `MIDI CONTROL = Off` mientras se vuelca o escribe SysEx.
+- El aparato debe estar **en modo de reproducción de patrón** para recibir
+  bulk de patrón, y en modo canción para el de canción (manual, p. 129).
 - No se debe tocar el panel durante la transferencia.
-
-`MIDI CONTROL = Out` o `In/Out` hace que el QY100 emita cerca de 49 mensajes de
-reloj por segundo. En transferencias largas esa corriente puede provocar pérdida
-silenciosa de bloques aunque los mensajes recibidos tengan checksum válido.
+- `MIDI CONTROL = Off` es **recomendable pero no requisito**: el manual (p. 127)
+  lo limita a la reproducción sincronizada y un patrón entero se escribió y
+  releyó el 2026-08-12 sin tocarlo. La recomendación queda por otra razón,
+  medida: en `Out` o `In/Out` el QY100 emite ~49 mensajes de reloj por segundo,
+  y en transferencias largas esa corriente puede provocar pérdida silenciosa de
+  bloques aunque los checksums salgan válidos. Este documento lo daba por
+  requisito, y era la inferencia de siempre vestida de regla.
 
 ## Uso
 
@@ -148,6 +166,44 @@ ordena las pistas antes de los cinco bloques de cabecera y pide confirmación.
 Las secciones son `0=Intro`, `1=Main A`, `2=Main B`, `3=Fill AB`,
 `4=Fill BA`, `5=Ending`. Las pistas son `0–7`: D1, D2, PC, BA y C1–C4.
 
+### Generar un estilo entero
+
+```bash
+.venv/bin/python syx.py estilo --patron 60 --in "M4" --out "M4"
+```
+
+Seis secciones por seis pistas **en una sola transferencia**. La diferencia con
+`generar` no es de tamaño: aquel lee el patrón, sustituye una pista y lo reescribe
+entero, así que montar un estilo serían 36 transferencias completas — y cada una
+es una ocasión de que un corte a medias corrompa la contabilidad de memoria del
+equipo. Aquí se lee una vez, se arma todo en memoria y se escribe una vez.
+
+Sin `--escribir` solo previsualiza. `--pistas 4,5` escribe solo esas, que es lo
+que permite **el patrón mixto**: frases de fábrica referenciadas en las pistas
+rítmicas y material generativo en las de acorde.
+
+Las secciones no son intercambiables y la receta lo respeta: `Fill AB` y `Fill BA`
+son transiciones **direccionales** y el footswitch cicla entre ellas en vivo, así
+que la forma la dictó Yamaha y lo único que se elige es la densidad.
+
+### Buscar frases preset
+
+```bash
+.venv/bin/python syx.py frases Bossa
+.venv/bin/python syx.py frases --categoria PC --beat 16
+```
+
+Devuelve **categoría, beat y número**, que son los tres campos con los que se
+direcciona una frase — y justo lo que hay que escribir en la cabecera del patrón
+para referenciarla. Avisa si el juego de las seis secciones está completo.
+
+**Una frase de fábrica es una referencia y no cuesta memoria de usuario**: son dos
+bytes del registro de la cabecera y nada más. Un estilo puede apoyar toda su base
+rítmica en las 4.285 de Yamaha y pagar solo por el material propio.
+
+Hoy se pueden escribir 7 de las 15 categorías (`Da` `Fa` `PC` `Ba` `Gb` `KC`
+`BR`); el resto solo desde el panel. Ver `CLAUDE.md`.
+
 ### Buscar voces
 
 ```bash
@@ -174,7 +230,7 @@ porque un Program Change reescribe la voz del mezclador de la canción cargada.
 ### Exportar a MIDI
 
 ```bash
-.venv/bin/python exportar_midi.py ep-quiebre --cuantizar 16
+.venv/bin/python exportar_midi.py mi-tema --cuantizar 16
 ```
 
 Los motores trabajan a 480 relojes por negra, que es el `ticks_per_beat` del
@@ -222,7 +278,7 @@ el comportamiento vigente mandan `qy100syx/patternfmt.py`,
 .venv/bin/python test_protocol.py
 ```
 
-Son **117 comprobaciones offline**, sin hardware. Cubren direcciones y plantillas
+Son **175 comprobaciones offline**, sin hardware — menos si `dumps/` va incompleto, porque las ultimas decodifican volcados reales. Cubren direcciones y plantillas
 del Data Filer, construcción y parseo de mensajes, checksum, detección de
 corrupción, empaquetado 7↔8, pistas reales, codificación ida y vuelta, secciones,
 cabeceras y archivos de 32 compases.

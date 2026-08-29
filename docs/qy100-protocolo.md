@@ -1,59 +1,27 @@
-# CLAUDE.md
+# Inside the QY100 — protocol, formats and firmware
 
-> **This is the shareable subset of a larger working repository.**
+What is known about the device at byte level: SysEx, pattern and song format, the
+factory phrases, and the firmware image. The tool that implements all of this is
+[`qy100-syx/`](../qy100-syx/).
+
+> **How to read the marks.** Everything here is in one of three states, and
+> keeping them apart is what stops mistakes repeating: nearly all of this
+> project's have lived on the border between the second and the first.
 >
-> Not included here, and why:
+> - `[M]` **measured** against the device or a primary source. Usable.
+> - `[D]` **deduced** from something that is measured. Coherent, unchecked.
+> - `[V]` **unverified**, or checked by a route that doesn't prove it.
 >
-> - **The manuals, the firmware image and Yamaha's Data Filer.** You'll already
->   have those; the page citations throughout still point at them and resolve.
-> - **Most of the reference dumps** and all the generated MIDI (`midi/`). Not
->   needed to use the tools, and some contain unreleased music. The eight dumps
->   the test suite decodes **are** included, so the tests run; the suite reports
->   a lower total here than in the working repo for exactly that reason.
-> - **An EP** that was produced with these tools. It belongs to someone else, so
->   only the technical measurements taken from it survive here — the memory
->   arithmetic, the note counts, the per-minute cost. Those are cited as "the EP".
->
-> Everything else is here: the decoders, the generators, the live-play, screen
-> and MIDI-export tools, and this document, which is the record of what is known
-> about the format and how each piece of it was established.
-
-Guidance for Claude Code (claude.ai/code) when working in this repository.
-
-Tools and findings for the **Yamaha QY100** (hardware sequencer, 2000), in two
-independent Python subprojects, each with its own `.venv`.
-
-Tools and findings for the **Yamaha QY100 hardware music sequencer** (released 2000), in two independent Python subprojects.
-
-- `Manuales/` and `manuales-md/` are referenced throughout but **not included** — see the note at the top. Citations are by page number and still resolve against the real manuals.
-- [`qy100-arp/`](qy100-arp/) — external arpeggiator + generative sequencer over MIDI. [README](qy100-arp/README.md)
-- [`qy100-syx/`](qy100-syx/) — SysEx bulk dump / backup / restore. [README](qy100-syx/README.md)
-- [`qy100-remote-transmission-mapping/`](qy100-remote-transmission-mapping/) — live-captured mappings of the standard XG Parameter Change messages the QY100 sends/accepts for individual panel settings, distinct from `qy100-syx`'s model-specific bulk dump protocol. [README](qy100-remote-transmission-mapping/README.md); see "Remote control over MIDI" below.
-
-Each has its own `.venv`; they are independent.
-
-## qy100-arp
-
-External arpeggiator + generative sequencer for the QY100, over MIDI. The QY100 has no arpeggiator (verified — zero hits for "arpegio"/"arpeggio" in both manuals), so this adds one from outside without touching firmware.
-
-```bash
-cd qy100-arp && .venv/bin/python test_engine.py     # tests, no hardware needed
-```
-
-```bash
-cd qy100-arp && .venv/bin/python run.py --list      # show MIDI ports
-```
-
-Key design constraint: **everything is driven by incoming MIDI Clock ticks (24 PPQN), never by a local timer.** The QY100 is the master; the engine follows. That is why it can't drift. Song Position Pointer repositions the absolute tick counter so patterns align to the sequencer's bars. Don't introduce independent `time.sleep`-based scheduling into the engines — it would break sync.
-
-Divisions all land on integer ticks at 24 PPQN (`1/16` = 6, `1/8T` = 8, etc.), so step timing is exact.
-
-Three QY100 settings are mandatory or nothing works — `MIDI SYNC=Internal`, `MIDI CONTROL=Out`/`In/Out`, `ECHO BACK=Off` (manual pp. 127–128). The last one prevents a feedback loop.
+> A coherent inference sounds exactly like a fact. The bambuco came out wrong
+> three times running for that reason, and the DrumBrute's trigger parameter was
+> attributed to the wrong byte because it happened to be first in the list.
 
 ## qy100-syx
 
 ```bash
-cd qy100-syx && .venv/bin/python test_protocol.py       # 50 checks, no hardware
+cd qy100-syx && .venv/bin/python test_protocol.py       # 175 checks, no hardware
+                                                        # (some read dumps/; the
+                                                        #  total drops without them)
 ```
 
 ```bash
@@ -103,11 +71,11 @@ A second round measured the sends, and **corrected a guess made from position al
 | 162 | drum flag | 1 on D1/D2/PC | measured |
 | 170 | volume | 100 | measured |
 | 178 | pan | 64 | measured |
-| 186 | dry level | 127 | **inferred** from value and XG order |
+| 186 | dry level | 127 | `[D]` **inferred** from the value and the XG ordering |
 | 194 | chorus send | 0 | measured |
 | 202 | reverb send | 40 | measured |
 | 210 | variation send | 0 | measured |
-| 218 | ? (note shift?) | 64 | **unidentified** |
+| 218 | ? (note shift?) | 64 | `[V]` **unidentified** |
 
 The order matches the XG multi-part spec exactly — volume, pan, dry level, chorus, reverb, variation — which is what makes 186 a confident inference rather than a shot in the dark. It is still not measured.
 
@@ -124,15 +92,15 @@ The two differ by 64. Reading `63` off the panel and writing 63 into the byte gi
 
 This closes the gap that looked worst all session — the assumption that the sounding voice lived outside the pattern and was unreachable by SysEx. It was forty bytes past where we had stopped reading.
 
-**`SOURCE CHORD` is per-track** — prefix byte 21 (root, C=0) and byte 22 (type, same table as the current chord). Reading is verified; writing is not, because changing it from the panel also moves header block 3 byte 75, a byte that shifts with phrase type, chord root and chord quality alike — it packs several fields and is not isolated.
+**`SOURCE CHORD` is per-track** — `[M]` for reading, `[V]` for writing — prefix byte 21 (root, C=0) and byte 22 (type, same table as the current chord). Reading is verified; writing is not, because changing it from the panel also moves header block 3 byte 75, a byte that shifts with phrase type, chord root and chord quality alike — it packs several fields and is not isolated.
 
 A methodological correction worth keeping: byte 16 was first attributed to chord quality because it moved during the source-chord test. It is the phrase-voice program, and it moved because *opening the Phrase Table* made the device write the track's real voice into it. **In a diff, a byte that changes at the same time as your edit is not necessarily caused by your edit** — entering an editor is itself an action with side effects.
 
-**`TYPE` is decoded** — prefix byte 20, measured for all five values (`Bypass` `03`, `Chord 1` `90`, `Bass` `92`, `Parallel` `94`, `Chord 2` `A0`), plus a bit (`0x08`) in the pattern header at block 3 byte 75 that is set only for `Chord 1` and `Bass`, exactly the pair the manual says `HI KEY` applies to. `patternfmt.set_phrase_type()` / `set_header_hikey()` reproduce the device's own bytes in all five states. Treated as a lookup table: `Bypass` and `Chord 2` do not fit the bit pattern the other three share, so the arithmetic is not invented. The header bit's offset was measured only for Main A track 0 — re-measure before writing it for another track.
+**`TYPE` is decoded** — prefix byte 20, measured for all five values (`Bypass` `03`, `Chord 1` `90`, `Bass` `92`, `Parallel` `94`, `Chord 2` `A0`), plus a bit (`0x08`) in the pattern header at block 3 byte 75 that is set only for `Chord 1` and `Bass`, exactly the pair the manual says `HI KEY` applies to. `patternfmt.set_phrase_type()` / `set_header_hikey()` reproduce the device's own bytes in all five states. Treated as a lookup table: `Bypass` and `Chord 2` do not fit the bit pattern the other three share, so the arithmetic is not invented. `[V]` The header bit's offset was measured only for Main A track 0 — re-measure before writing it for another track.
 
 Protocol comes from the service manual §(3-6-3) and Table 1-9 — both hand-corrected in the Markdown. Addresses use `P=1` for QY100 (`0x12 nn tr` = user pattern), `P=0` for QY70; that single nibble is the whole difference between the two machines' style files.
 
-### Verified against the hardware (2026-07-28, MOTU M4 interface)
+### Verified against the hardware (2026-07-28)
 
 - **Checksum is `bytecount+addr+data`** — two's complement, 7-bit. Confirmed on 60+ real messages, zero failures. No longer a guess.
 - **`bulk mode ON` is mandatory** before any dump request — **and before CLEAR commands too**. Without it the QY100 silently ignores them. A bare `CLEAR ALL` left every pattern intact; the same message wrapped as `bulk ON → CLEAR ALL → bulk OFF` wiped the device. The manual lists the flag but never says it is a precondition.
@@ -144,6 +112,25 @@ Protocol comes from the service manual §(3-6-3) and Table 1-9 — both hand-cor
 - **`bulk mode` locks the front panel.** Leave it on and the device appears dead to its own buttons — `dump` now always sends OFF in a `finally`, including on failure.
 - **A panel-initiated dump is self-framing**: `bulk mode ON → CLEAR ALL → data blocks → bulk mode OFF`. The CLEAR ALL is part of the payload so a restore wipes before writing. That framing also makes it possible to split a capture containing several dumps.
 - **`MIDI CONTROL` must be `Off` while dumping** (2026-07-29). With it on, the QY100 emits ~49 clock messages per second continuously and bulk captures lose whole blocks: the same pattern returned 8 blocks, then 3, then 2, then a different subset each attempt — the 5-block pattern header came back as 2. Everything that arrives is well-formed with a valid checksum, so it looks like the data changed rather than like loss. Filtering the clock in the driver (`rtmidi.ignore_types(timing=True)`, now applied automatically in `transfer.silenciar_reloj`) is **not sufficient** — it must be turned off at the device. Practical workflow: `In/Out` to sync a recording, `Off` to dump.
+- **Before blaming the QY100, power-cycle the interface.** After a long transfer a USB-MIDI interface can leave its port half-open, and from software that looks exactly like a device that isn't answering: the verification dump gets no reply and tracks don't leave MIDI OUT even though they sound. Cycling it fixes it.
+
+  **And it swallows WRITES just as silently** (2026-08-08, the second time the
+  same day). Two styles were written with the interface already half-open: the
+  software sent the blocks, reported "47 blocks written", and the device received
+  nothing. The only symptom was that the following dump still showed the previous
+  content. **A write reported as successful through a half-open port proves
+  nothing**; the only thing that proves it is reading back.
+
+  It cost two false diagnoses on 2026-08-08 — `MIDI CONTROL`, the panel display and the cabling were all checked — because the symptom is indistinguishable from the real failures documented here. **It is the cheapest check and it goes first.**
+
+- **"It isn't answering" has at least three distinct causes, and `setup` separates them.**
+  All three seen the same day: a half-open interface (writes are lost too), an
+  **empty pattern** — which returns nothing and is indistinguishable from a
+  failure — and a **device that is playing**, which ignores requests and writes
+  silently. Asking for `dump setup` is a single block: **if it answers, the
+  device and the cable are fine** and the problem is elsewhere. It is the
+  cheapest check after cycling the interface.
+
 - **The QY100 transmits MIDI Clock even while stopped.** So incoming clock is *not* evidence that the sequencer is running, and no tool should infer "playing" from it. A recording script that auto-started after seeing clock without a Start fired 32 notes at a device sitting in the utility menu and recorded nothing. Wait for an actual Start.
 - **Capture must be callback-driven, not polled.** The QY100 streams MIDI clock continuously (48 ticks/s) and that flood makes a polling loop drop whole SysEx messages. The symptom is deceptive: everything that arrives is well-formed with a valid checksum, only some blocks are missing. The tell was that single-block items (setup, guitar effect) came back identical every time while anything multi-block varied.
 - Identical payloads legitimately appear under different addresses — empty patterns share the same `7F` header block. That is not corruption.
@@ -151,6 +138,37 @@ Protocol comes from the service manual §(3-6-3) and Table 1-9 — both hand-cor
 - **The QY100 is deterministic** — five consecutive `setup` requests returned identical bytes once the device was cleared. The earlier chaos was volume: long multi-block transfers were losing whole messages under the polling capture. Small dumps were always reliable, which is why single-block items (setup, guitar effect) matched every time.
 - **An empty pattern or song returns nothing at all.** That makes a cleared device the ideal reverse-engineering baseline: there is no background to subtract, so anything that appears after recording is the recorded data.
 - **`CLEAR ALL` also resets the utility settings** — it silently reverted `MIDI CONTROL`, which stopped clock transmission. Re-check page 127/128 settings after any clear.
+
+### The factory styles live on a DIFFERENT CHIP, which is why they cost no memory
+
+From the service manual's block diagram (p. 9), reading the capacities in
+**megabits**, which is how memory chips are specified:
+
+```
+IC6   SRAM 1M          = 128 KB    user data, battery-backed
+IC4   Mask/FlashROM 8M  =   1 MB    the 128 styles and the 4,285 phrases
+IC3   FlashROM 16M      =   2 MB    main program (the firmware takes 1.38)
+IC27  Mask/FlashROM 64M =   8 MB    tone generator and samples
+```
+
+**`SRAM 1M` is 128 KB, not 1 MB.** The part numbers confirm it: `uPD431000` and
+`M5M51008` are 128K x 8 bits. That **confirms by an independent route** the
+128 KB figure that had been deduced by counting 128-byte blocks against the
+`USED MEMORY` bar, which gives no number. Two paths that don't talk to each
+other, agreeing.
+
+**The factory catalogue has eight times more memory than the user does**, and on
+a different chip. That is why referencing a preset phrase costs nothing: it is
+not a saving trick, it is **using IC4's megabyte instead of spending IC6's
+128 KB**. They are physically separate memories.
+
+Practical consequence: **preset phrases cannot be read out of the firmware.**
+`_QY100_v137.mid` rewrites IC3 only; searching the extracted image for the style
+names (`80MRk`, `DncSw`, `AfrJz`, `Bossa`…) gives **zero hits**. To read a
+factory phrase note by note it has to be copied into user memory with **Job 15
+(*Copy Phrase*)** and dumped from there. It is slow — one at a time, from the
+panel — but it is the only route, and it turns the catalogue into studiable
+material.
 
 ### The Data Filer is the ground truth
 
@@ -166,7 +184,7 @@ The 7-bit packing scheme is still undetermined; `inspect --unpack` tries 7-in-8 
 
 ### Song format — the pattern track is solved
 
-[`songfmt.py`](qy100-syx/qy100syx/songfmt.py). Songs live at `11 nn tr`. The **pattern track `Pt`** — which style and section play in each measure — is at `tr = 0x19` (25) and, unlike pattern tracks, carries **no 26-byte prefix**: the event stream starts at byte 0.
+[`songfmt.py`](../qy100-syx/qy100syx/songfmt.py). Songs live at `11 nn tr`. The **pattern track `Pt`** — which style and section play in each measure — is at `tr = 0x19` (25) and, unlike pattern tracks, carries **no 26-byte prefix**: the event stream starts at byte 0.
 
 ```
 F0 00     start (same marker as pattern tracks)
@@ -220,13 +238,13 @@ It also settles the architectural bet behind the EP: **writing songs with one pa
 
 The unit is a **MIDI beat = 6 clocks = one sixteenth**, counted from the start of the song. 14 bits caps it at 16,384 sixteenths = **1,024 bars in 4/4**, far beyond the EP's longest at 112.
 
-This closes a symmetry with [`qy100-arp/`](qy100-arp/), which uses SPP the other way round — repositioning its absolute tick counter so patterns align to the QY100's bars when the QY100 is master. The same mechanism holds with the QY100 as slave.
+This closes a symmetry with [`qy100-arp/`](../qy100-arp/), which uses SPP the other way round — repositioning its absolute tick counter so patterns align to the QY100's bars when the QY100 is master. The same mechanism holds with the QY100 as slave.
 
 `SONG SELECT` (`F3H`) is also **received** in song play standby, so which of the 20 songs is loaded can be switched remotely. Not the same `F3` as the section event in the song pattern track — that one is a byte inside bulk dump payload, unrelated to live MIDI status bytes.
 
 ### Pattern format — SOLVED
 
-[`qy100-syx/HALLAZGOS.md`](qy100-syx/HALLAZGOS.md) is the record; [`patternfmt.py`](qy100-syx/qy100syx/patternfmt.py) is the implementation. The event grammar came out of Yamaha's own decoder inside `QY100.exe` (the Data Filer) and is independently verified against all eight reference dumps.
+[`qy100-syx/HALLAZGOS.md`](../qy100-syx/HALLAZGOS.md) is the record; [`patternfmt.py`](../qy100-syx/qy100syx/patternfmt.py) is the implementation. The event grammar came out of Yamaha's own decoder inside `QY100.exe` (the Data Filer) and is independently verified against all eight reference dumps.
 
 **Unpack first.** The 147 seven-bit payload bytes concatenate to 1029 bits; take **1024 = 128 bytes of 8 bits** and discard the last 5, **per block**. On that unpacked stream the fields *are* byte-aligned. Every earlier attempt failed because we were reading the stream in 7-bit units, which made fields look like they started mid-byte.
 
@@ -282,13 +300,38 @@ The panel's length counter renders the value with a **single digit**, so 16 disp
 
 ```
 offset 0     16 bytes   "YQ1PAT     V1.00"   magic + version, ASCII
-offset 114    2 bytes   big-endian length of the meaningful payload (546)
+offset 114    2 bytes   `02 22` — a CONSTANT, not a length (see below)
 offset 128    N bytes   the blocks, ALREADY UNPACKED to 8 bits
 ```
 
 The body is **byte-for-byte the same data our decoder produces after `unpack()`** — 640 bytes for a 5-block pattern header, differing only in the pattern name and in padding past the declared length. So `patternfmt` reads a `.q1p` directly with the 7→8 step skipped, and both files decode to 32 measures in all six sections, confirming bytes 15–20 by an independent route.
 
-The length field at 114–115 is inferred from a single file: 546 is exactly where the two files stop agreeing. Re-check it against another `.q1p` before relying on it.
+**Bytes 114–115 are NOT a length. Refuted** (2026-08-10) by the datasheet of
+[qyTools](https://github.com/Max-Coppola/qyTools), independent work on the same
+protocol: they are the **constant `0x02 0x22`** that closes the per-page packet
+count table in the metadata block.
+
+It had been deduced from 546 being exactly where two files stopped agreeing, and
+546 is `0x0222`. Coincidence. **All 41 `.q1p` files here are exactly 768 bytes**,
+so with this corpus the hypothesis was neither testable nor refutable — and it
+was still written as if it were. It had been flagged for re-checking "against
+another file"; what was missing was a file *of a different size*, not another
+file.
+
+Their reading of the container, more complete than ours:
+
+```
+offset 0     16 bytes   magic "YQ1PAT     V1.00"
+offset 16   112 bytes   metadata: byte 0 = destination slot (0-based)
+                        byte 19+2*(page-8) = that page's packet count
+                        bytes 98-99 = constant 02 22   <- our 114-115
+offset 128        N     the pages, already unpacked
+(end)       640 bytes   what we call the pattern header
+```
+
+And a consequence we had not seen: **the 768 bytes of doffu's files are
+128 + 0 + 640.** They carry no page data at all — they are empty patterns, which
+is why the "body" we were comparing was only the header.
 
 Practically this matters a lot: **a SmartMedia card reader turns every experiment offline.** No `bulk mode`, no panel lock, no clock flooding the capture, no half-written transfers corrupting the memory accounting, no power cycles. Diff-and-extrapolate on files is what doffu has been doing all along, and it is strictly safer and faster than doing it over SysEx. SysEx remains necessary for playing the device live and for songs; for *decoding pattern structure*, files win.
 
@@ -332,7 +375,7 @@ Writing to the device (`send`) prompts for confirmation, and clear commands are 
 
 ### The 4,285 preset phrases are documented
 
-`manuales-md/QY100_Frases_Preset.md` and `qy100-syx/frases.json`, both regenerated by [`extraer_frases.py`](qy100-syx/extraer_frases.py) from Data List pp. 16–34. The count matches Yamaha's published 4,285 exactly.
+`manuales-md/QY100_Frases_Preset.md` and `qy100-syx/frases.json`, both regenerated by [`extraer_frases.py`](../qy100-syx/extraer_frases.py) from Data List pp. 16–34. The count matches Yamaha's published 4,285 exactly.
 
 A phrase is addressed by **three fields, not one number**: category + beat + number (manual p. 54). Beat takes only `8 beat`, `16 beat`, `3/4 beat`, and the number's range changes with each combination — 45 blocks in all, each numbered from 001.
 
@@ -346,6 +389,97 @@ Two traps in the extraction, both of the kind that pass every check:
 - **The collision is silent.** A misfiled phrase overwrites another at the same number instead of leaving a hole, so a validator that only looks for gaps in 001…N reports success while 13 phrases have vanished. **Check for duplicates as well as gaps**; the totals looked plausible either way, and only the published 4,285 exposed the shortfall.
 
 One erratum in Yamaha's own list: the first phrase of `GR` / `3/4 beat` (p. 28) is printed `01` instead of `001`. Normalized on extraction.
+
+### Factory phrases are references and cost no memory (2026-08-08)
+
+**Measured on a freshly cleared device**, which is the ideal baseline because an
+empty pattern returns absolutely nothing: anything that appears is what was just
+done.
+
+Assigning a preset phrase to a track from the panel leaves the pattern **with no
+track blocks at all**. Only the 5 header blocks come back. The notes stay in ROM:
+the pattern stores a reference. Confirmed three times running.
+
+The consequence is architectural, not a detail: **a style can mix referenced
+factory phrases (free) with its own generated phrases (which do cost)**, paying
+memory only for the second kind. With 128 KB shared between songs, patterns and
+phrases, that changes how much fits.
+
+**A preset-phrase reference is TWO BYTES of the header registry, and it is
+SOLVED** (2026-08-08). Writing it over SysEx works and costs no user memory: the
+notes stay in ROM.
+
+```
+flag     (bytes 21-68)    = (category_index << 3) | state
+tr table (bytes 69-116)   = phrase number - 1
+
+   state 0   the track has its own content
+   state 1   preset phrase, 16 beat
+   state 2   preset phrase, 8 beat
+   state 3   preset phrase, 3/4 beat
+   state 6   empty
+```
+
+**Five bits of category and three of state, not four and four.** The category
+table comes out of the **firmware**, at offset `0x11AE24` of the image
+`extraer_rom.py` produces: 32 three-byte entries holding the fifteen codes plus
+`__` gaps reserved by Yamaha.
+
+```
+-- Da Db __ __ Fa Fb __ __ PC __ __ __ Ba Bb __ __ __ Ga Gb GR __ __ KC KR __ __ __ PD BR SE US
+```
+
+It matches the **eight flags measured on the device, 8 of 8**, and explains the
+eight values that looked invalid: all eight land in `__` gaps.
+
+And it accounts for something noted for weeks as a special case: **`F8` and `FE`
+are not magic values**. They are category `US` — user phrase, index 31 — with
+states 0 and 6. The format never had exceptions; we did.
+
+`patternfmt.bandera_frase(category, beat)` and `leer_bandera(b)`.
+
+The second table is **overloaded**: it stores the `tr` when a track has its own
+content, and the phrase number when it references a preset. That is why
+`set_registry` **preserves any slot whose state it doesn't recognise**; without
+that, writing a single generated track silently erased the preset phrases
+assigned from the panel — no error, no signal.
+
+**Why it cost a whole afternoon, which is the only reusable part of this.** A
+4+4 split was assumed and the high nibble swept. With the low nibble fixed at
+`9`, the resulting index is `(k<<1)|1` — **odd numbers only**. The eight
+categories that "didn't exist" were all at even indices and the sweep could never
+reach them. The same trap as the time-signature denominator: **a sweep that
+doesn't cover the whole range does not prove an absence.**
+
+Along the way three false readings were accepted, all for the same reason:
+reading a field while varying only one other thing. `09` versus `B9` was
+attributed to the track's role by analogy with prefix byte 19 (it was the
+category); the low nibble `9` was read as "this is a preset phrase" (it was the
+beat, static because that variable was never moved); and "empty" was used for two
+different things — a blank row and a row with a category but no name — which
+falsely refuted a correct hypothesis.
+
+**What solved it was to stop asking the screen and look at the firmware.** Twelve
+panel readings against one `grep` that closed it outright. When a field resists
+several rounds of measurement, look for its table in ROM before probing further:
+the device has the answer written down.
+
+**Verified end to end**: an afrobeat style in pattern 4 with drums, percussion
+and bass referenced from `AfrJz` — including `Db`, `Bb` and `Fb`, which were
+among the unreachable ones — and generated guitar and horns on top. **From
+25.0 KB to 8.4.**
+
+**`syx.py referencia` writes references**, which was the missing piece: the
+format had been solved and measured since 2026-08-08 but every use went through a
+one-off script. It takes `SECTION:TRACK=CAT/BEAT/NUM` and **validates against
+`frases.json` before touching the device** — a reference to a phrase that doesn't
+exist writes just as cleanly, with no error, and the only symptom is a silent
+track with a nameless row on the panel.
+
+It is orthogonal to `estilo` and `andina` and chains in any order, because
+`set_registry` preserves slots whose state it doesn't recognise. If the track had
+its own content, its blocks are removed: it switches to referencing and stops
+costing memory.
 
 ### User phrases are slots, not a bank — and `Us—NNN` is our `tr` byte
 
@@ -375,6 +509,41 @@ Job 17 carries a trap worth remembering: *"los datos de patrón fuente **se rear
 
 For generated material the better framing is that **the engine is the library, not the slots** — `syx.py generar` renders straight into any (pattern, section, track), so varying seed, length or section is a parameter rather than a copy.
 
+### Section transitions belong to SONG mode, not to pattern mode
+
+Measured 2026-08-08, and it decides where the live set is played:
+
+```
+PATTERN mode   sections as raw loops. Intro does not jump to Main A, fills
+               don't return on their own, and the **Ending repeats**.
+SONG mode      Intro -> Main A, Fill AB -> Main B, Fill BA -> Main A, and the
+               **Ending closes and stops playback**.
+```
+
+The manual describes the automatic transitions (p. 1211-1214) without repeating
+which mode they belong to, but the page opens with *"preset styles are selected
+and played back in **song mode**"*. It was read as general behaviour of the style
+engine and it was about one specific screen. **An instruction without its mode
+context is not an instruction**: the sentence was correct and was applied in the
+wrong place for a whole session, with the user reporting three times that the
+Ending kept looping.
+
+In practice: **pattern mode is for editing and testing; playing live means song
+mode**, with an empty song pointing at the user style. There the footswitch
+(p. 121) plus the automatic transitions give real structure — step on the fill
+and the device takes itself to Main B.
+
+**And that song is written entirely over SysEx.** Verified: a header with name
+and tempo plus the `Pt` track pointing at `U05`, read back exact and playing,
+with the transitions and the final stop. `songfmt.encode_pattern_track`. Cap
+**~21 bars**, because block chaining in songs is unverified and the track has to
+fit in one.
+
+Consequence for the live set: **a piece is a user style plus a short song that
+triggers it**, not a song with the notes written out. The song costs one block;
+the style costs whatever its material costs — and with preset-phrase references,
+very little.
+
 ### Playing a user style live — ABC, and Yamaha's rules for reharmonizable phrases
 
 A user style is not only storage, it is a **playable instrument**, and that is the case for baking generative material into patterns rather than songs. Three live controls, all on the device:
@@ -403,7 +572,7 @@ One practical constraint: `SOURCE CHORD` (prefix bytes 21–22) is readable but 
 
 Two tools added 2026-08-02, both of which change how the rest of the project should work.
 
-**[`tocar.py`](qy100-syx/tocar.py) plays the QY100's tone generator in real time.** Notes arriving on MIDI IN sound with the voice assigned to that channel, so the device can be played without touching the sequencer — nothing here writes to its memory. Here **we are the clock master**, so timing is a local `sleep` loop; that is the exact inverse of [`qy100-arp/`](qy100-arp/), where the engines follow incoming clock and a local timer would break sync. The rule from there does not apply here because there is nothing to follow.
+**[`tocar.py`](../qy100-syx/tocar.py) plays the QY100's tone generator in real time.** Notes arriving on MIDI IN sound with the voice assigned to that channel, so the device can be played without touching the sequencer — nothing here writes to its memory. Here **we are the clock master**, so timing is a local `sleep` loop; that is the exact inverse of [`qy100-arp/`](../qy100-arp/), where the engines follow incoming clock and a local timer would break sync. The rule from there does not apply here because there is nothing to follow.
 
 Pieces are plain functions returning a `Pieza`; `prueba`, `vigilia`, `acompanar` (a backing track to play guitar over), `cumbia` and `andino` are written, plus `barrido`, which plays three notes on each of the 16 channels to find out which ones sound.
 
@@ -413,11 +582,11 @@ Three things it has to get right, all learned the hard way:
 - **A Program Change rewrites the loaded song's mixer voice for that channel.** Play on channels the target song does not use, or select an empty song slot first.
 - **Stuck notes need `All Sound Off` (CC 120), not just `All Notes Off` (CC 123).** 123 only releases the keys: anything already in its release phase keeps sounding, and with long tails — SFX-kit textures, pads, a `Stream` on a three-bar gate — that can ring indefinitely. 120 cuts it regardless. Sending only 123 left the device beeping for an entire afternoon.
 
-  **And the beep was mistaken for a fault in the music.** Six tracks were played back in isolation, each ruled out by ear, and three separate hypotheses about the arrangement were built and discarded before anyone suspected the tooling. The tell was there early and got ignored: an `All Notes Off` silenced it once, and it came back **right after the next write** — twice. When a symptom disappears on a global reset and returns after your own action, the fault is yours, not the data's. `ep-escribir.py` now sends both CCs on all 16 channels after every write.
+  **And the beep was mistaken for a fault in the music.** Six tracks were played back in isolation, each ruled out by ear, and three separate hypotheses about the arrangement were built and discarded before anyone suspected the tooling. The tell was there early and got ignored: an `All Notes Off` silenced it once, and it came back **right after the next write** — twice. When a symptom disappears on a global reset and returns after your own action, the fault is yours, not the data's. The write script now sends both CCs on all 16 channels after every write.
 
-**[`exportar_midi.py`](qy100-syx/exportar_midi.py) writes a standard `.mid`, and for getting notes into a DAW it beats the transfer outright.** The engines run at 480 clocks per quarter, which is set directly as the file's `ticks_per_beat` — the conversion is 1:1 with no rounding. Against recording the QY100 into Ableton it is exact, instant, needs no `MIDI Sync` / `MIDI control` / `Rec Count` dance, and cannot silently drop blocks. **The QY100 route still earns its keep for playing live, for its voices, and for pattern mode; for moving notes it does not.**
+**[`exportar_midi.py`](../qy100-syx/exportar_midi.py) writes a standard `.mid`, and for getting notes into a DAW it beats the transfer outright.** The engines run at 480 clocks per quarter, which is set directly as the file's `ticks_per_beat` — the conversion is 1:1 with no rounding. Against recording the QY100 into Ableton it is exact, instant, needs no `MIDI Sync` / `MIDI control` / `Rec Count` dance, and cannot silently drop blocks. **The QY100 route still earns its keep for playing live, for its voices, and for pattern mode; for moving notes it does not.**
 
-`--cuantizar 16` snaps to sixteenths. That is the right grid for this material because every deliberate placement — euclidean hits, the bass on odd sixteenths, off-beat stabs — already lands on exact sixteenths; only `humanizar()`'s few-millisecond jitter is removed. **Quantising coarser destroys the music**: it would drag the bass from sixteenth 3 onto the downbeat. `ep-escribir.py` takes the same argument so the device and the DAW hold the identical version.
+`--cuantizar 16` snaps to sixteenths. That is the right grid for this material because every deliberate placement — euclidean hits, the bass on odd sixteenths, off-beat stabs — already lands on exact sixteenths; only `humanizar()`'s few-millisecond jitter is removed. **Quantising coarser destroys the music**: it would drag the bass from sixteenth 3 onto the downbeat. The write script takes the same argument so the device and the DAW hold the identical version.
 
 ### Two traps in note numbering
 
@@ -490,185 +659,108 @@ The **chord type list** (p. 36–37, rendered to `manuales-md/diagramas/qy100-ac
 
 The wall for actual firmware modification is the **SWX00B (HG73C205AFD)** CPU — Yamaha proprietary, two of them (IC1 main / IC2 sub), instruction set not publicly documented. Reading and rewriting the flash is solved; disassembling it is not. Prefer external augmentation (qy100-arp) or data-level changes over firmware patching.
 
-## Remote control over MIDI (live panel capture, 2026-08-11)
+## qyTools — a second implementation, and what it says about ours
 
-Distinct from everything above: the QY100 also speaks the **standard Yamaha XG Parameter Change protocol**, `F0 43 1n 4C aa bb cc dd... F7` — a different, model-agnostic message family from the QY100-specific Bulk Dump/Parameter Change protocol (`43 x0 5F`) that `qy100-syx` decodes. This was found by listening on the MIDI IN port live while operating the panel, not by reading the manual — the Data List's MIDI section covers Bulk Dump, not this. [`qy100-remote-transmission-mapping/`](qy100-remote-transmission-mapping/) holds what's been captured so far as JSON, meant to be extended.
+[qyTools](https://github.com/Max-Coppola/qyTools) (Max Coppola, AGPLv3) is a
+browser tool that replaces Yamaha's Data Filer: it talks to the QY100 and QY70
+over MIDI or over the ToHost serial port, and reads and writes `.BLK`, `.q1a`,
+`.q1p`, `.q1s`, `.syx` and `.mid`. It ships a **protocol datasheet independent of
+its code**, which is what makes comparison possible.
 
-**Plain navigation is silent.** Menu, Exit, Job (browsing), Pattern, and moving the playback position all transmit nothing — no SysEx, no CC, nothing. Confirmed with a broad listener (not just filtering for SysEx) after ruling out two false negatives first: `MIDI CONTROL` must be `Out` or `In/Out` for the device to transmit **anything**, not just for dump requests as `qy100-syx` needs; and a stale MIDI port handle after a cable reconnect can look identical to "the device sends nothing" — restart the listener after any physical reconnect before concluding silence is real.
+**The author was asked and confirmed the citation is fine** (2026-08-12). Note
+what that covers and what it does not: it settles how this document cites the
+datasheet, and says nothing about reusing qyTools' code — which is **AGPLv3**,
+so importing any of it would put this repository under AGPLv3 too. That
+distinction is worth keeping straight, because **nothing here needs his code**.
+What is useful is the datasheet's facts, and facts are not what a licence
+covers. Anything taken from it gets implemented from the documented behaviour
+and cited, never copied.
 
-**Executing a job that touches the whole mixer sends a fixed resync burst, not a description of what changed.** Triggering **Undo/Redo** (successful or failed — tested both, and a failed "nothing to undo" still fires it) transmits ~158 messages: for each of the 8 pattern tracks, Bank Select (CC0/32), Program Change, Volume (CC7), Pan (CC10), Reverb/Chorus send (CC91/93), and a batch of XG sound-controller CCs reset to center (71/72/73/74/93/94), plus a few raw SysEx messages at addresses `00 00 7E`, `00 00 7D`, and `08 0N 11`/`08 0N 23` per channel N. **This burst is byte-for-byte identical across a failed undo, a successful undo, and a redo** — it does not encode which action happened or what data changed, only "the mixer got reinitialized." Confirmed **one-directional**: replaying the exact captured burst back to the device (sent 3 times) does not trigger an undo or redo — it just re-applies those CC/PC values, which the device accepts silently. The actual undo/redo state machine is internal to the sequencer and isn't reachable by feeding back its own output.
+**What agrees, and why it matters that it agrees.** The event grammar is
+identical to ours: the one-byte delta (`0x80|n`, n<32), the two-byte one
+(`0xA0|hi5, lo7`), and notes of 3, 4 and 5 bytes according to duration (`0xC0`,
+`0xD0`, `0xE0`) followed by pitch and velocity. Also byte 14 of the time
+signature with the same formula, the per-section lengths in 15–20 minus one, and
+the two registry tables at 21–68 and 69–115.
 
-**Individual parameter changes are genuinely bidirectional**, unlike the job burst above — this is the useful part. Changing the pattern's **effect type** on the panel transmits a single message at address `02 01 40` with a 2-byte value (MSB = effect family, LSB = variant), and **sending that same message back over MIDI IN changes the effect type on screen** — verified live, not inferred. **And it isn't gated on which screen is open**: sent while the device was sitting on a completely different screen (not the FX page), it still took effect. This is a live parameter of the sounding pattern, not something that only listens while its own edit page is open. The full table of captured values is in [`qy100-remote-transmission-mapping/effect_types.json`](qy100-remote-transmission-mapping/effect_types.json); the family numbering (`00`=No Effect, `01`=Hall, `02`=Room, `03`=Stage, `04`=Plate, `05`/`06`=Delay LCR/L,R, `07`=Echo, `08`=Cross Delay, `09`=ER, `0A`/`0B`=Gate/Reverse Gate, `14`=Karaoke, `40`=Thru, `41`=Chorus, `42`=Celeste, `43`=Flanger, `44`=Symphonic, `45`=Rotary SP, `46`=Tremolo, `47`=Auto Pan, `48`=Phaser, `49`=Distortion, `4A`=Overdrive, `4B`=Amp Sim, `4C`/`4D`=3/2-Band EQ, `4E`=Auto Wah) matches Yamaha's public XG effect-type spec, which makes sense since this address family isn't QY100-specific. **The LSB variant numbering isn't a plain sequential count** — Chorus and Celeste go `00, 01, 02, 08` (jumping to `08` for the 4th variant), Flanger goes `00, 01, 08`, Phaser goes `00, 08`. That's the real, verified layout; don't assume a pattern for a family that hasn't actually been swept.
+**The two derivations came by routes that don't touch**: ours from Yamaha's own
+decoder inside `QY100.exe`, theirs from 22,682 records captured off the device.
+When two independent derivations converge byte for byte, that is worth far more
+than either on its own.
 
-This opens a real remote-control surface distinct from `qy100-syx`'s bulk-dump-only read/write: individual XG parameters (at minimum, effect type; unverified whether voice/pan/other per-part settings behave the same way) can be set live over MIDI without a panel-driven bulk transfer. Unmapped and worth extending: effect *depth* parameters, per-part voice/pan (mixer values *are* visible as plain CC7/CC10/etc. in the resync burst above, but that's read-only telemetry from a job trigger, not yet confirmed settable individually the way effect type is), and the system/job-level addresses (`00 00 7E`, `00 00 7D`, `08 0N 11`, `08 0N 23`) seen in the Undo/Redo burst but not yet decoded.
+**What it corrects.** Bytes 114–115 of the `.q1p` (see above). Our only fragile
+hypothesis about the container, and it was false.
 
-**A full sweep of every unmapped value in the effect-type address confirms there's nothing hidden there.** Sent all ~100 untested MSB values (`0C`–`3F`, `4F`–`7F`) with LSB=`00`, one every 2.5s, while watching the panel continuously. Result: every value below `40` displayed **No Effect**, every value at/above `40` displayed **Thru** — no garbage, no undocumented effect names. This lines up with real XG structure: `00`–`3F` is the *System Effect* block (Reverb/Room/Stage/Plate/Delay/Echo family) whose own bypass is `No Effect`; `40`–`7F` is the *Insertion Effect* block (Chorus/Flanger/Distortion family) whose own bypass is `Thru`. Each block clamps any value it doesn't recognize to its own default rather than exposing anything extra — a real, useful negative result, not just an untested gap. (Contrast with the chord-type field elsewhere in this project, which *does* render garbage past its valid range — this address validates instead.)
+**What they have and we don't** — open, in case it's useful:
 
-**Two more parameters mapped the same evening, both continuous 0–127 sends, addressed right next to each other:** turning the FX screen's **Reverb Send** knob fully up transmitted a clean sweep of 127 messages at address `02 01 58`, data counting `01`→`7F`; **Chorus Send** did the same one address higher, `02 01 59`. Reverb Send confirmed bidirectional the same way effect type was — sent `02 01 58 00` back over MIDI IN and the send audibly dropped to zero on the device. Full detail and the parallel-but-unconfirmed status of Chorus Send in [`qy100-remote-transmission-mapping/fx_send_levels.json`](qy100-remote-transmission-mapping/fx_send_levels.json).
+- `[M]` **The events that aren't notes — and they had already bitten us.** They
+  document control change, aftertouch, RPN/NRPN, program change, bank select,
+  pitch bend and mid-track voice change. Our decoder understood only notes and
+  deltas, and on an unknown byte it **advanced one and carried on**, so
+  everything after that came out with the wrong pitch and time and no error.
 
-Worth being cautious about: **adjacent addresses aren't reliably related parameters.** The `58`/`59` pattern (Reverb, then Chorus right after) suggested a guess — `02 01 5A` as a Variation/Effect send, since the panel has no visible knob for one. Sent it at max value (`7F`); no audible or visual difference at all. Either it isn't a real parameter, or it's real but not routed anywhere perceptible in this configuration. Don't assume the next address in sequence is meaningful without testing it — the effect-type sweep above found *no* hidden values at all in a ~100-value range, so a guess landing on nothing is the more likely outcome, not the exception.
+  Making it stop and feeding it our own dumps split the failures into **two
+  different problems**. All the figures below are recounted by
+  [`medir_volcados.py`](../qy100-syx/medir_volcados.py) over **415 distinct
+  tracks**, which appear 955 times across 122 files — the dumps repeat between
+  files, and counting appearances instead of tracks inflates everything by more
+  than two.
 
-**Per-effect-type editable parameters (the panel's Variation Edit menu) are a third address family, separate from both the type selector and the system sends.** With Hall 1 selected, maxing out its **Reverb Time** control transmitted address `02 01 42`, 2-byte data `00 XX` climbing from `13` to `45`. Confirmed bidirectional the same way — sent `02 01 42 00 00` back over MIDI IN and reverb time dropped to its visible minimum on the device. Notably, unlike the two send levels, **this parameter's real range doesn't reach `7F`** — its ceiling is lower than the full byte range, so don't assume every continuous parameter spans 0–127 just because the sends did.
+  **`FB cc vv` is a three-byte control change.** `[M]` — **10 events**, all with
+  `cc = 64` (sustain pedal), spread over 8 tracks, values 0 six times and 127
+  four. Someone recorded playing with a pedal: one session, not a habit.
 
-**Four more parameters in the same edit menu followed a clean, systematic address layout**: Diffusion (`02 01 44`), Initial Delay (`46`), HPF Cutoff (`48`), LPF Cutoff (`4A`) — **every slot exactly +2 from the last**, all still under Hall 1. Each has its own real ceiling well short of `7F` (Diffusion tops around `09`, Initial Delay `3F`, HPF Cutoff `34`, LPF Cutoff `3C`). Only Reverb Time got the explicit "send a low value back and watch it change" bidirectional test; the other four are assumed to behave the same way given the identical message family, but that's an assumption, not a confirmed result. Not yet confirmed whether these addresses mean the same parameters under a different effect type, or whether each effect type has its own layout — test before relying on this outside Hall 1. Full detail in [`qy100-remote-transmission-mapping/effect_parameters.json`](qy100-remote-transmission-mapping/effect_parameters.json).
+  An earlier version of this paragraph claimed 451 occurrences, 438 with
+  `cc = 64` and 13 with `cc = 71`, and 224 releases against 227 presses, "almost
+  paired". **That count was of the byte `0xFB` anywhere in the stream** —
+  padding past the `F2`, the 26-byte prefix and misaligned tracks included. It
+  is a different quantity, not an imprecise version of this one: a byte that
+  happens to be `0xFB` is not an event, `cc = 71` never occurs once the stream
+  is walked in step, and 6 against 4 is not paired. The raw count today is 362.
 
-Also worth noting for anyone repeating this kind of live capture: **`MIDI CONTROL` gates transmission entirely** (nothing arrives with it `Off`, confirmed by testing a note-on with `MIDI CONTROL` toggled — even basic Note On/Off was silent until it was set to `In/Out`), and **a MIDI port handle can go stale after a physical cable reconnect** even though the port's name stays identical — restart the listener process after any physical reconnect, don't just trust that "same name" means "same live connection." Both cost real time chasing false negatives before the effect-type discovery.
+  Consuming `FB` whole instead of skipping one byte recovers **1 track** — and
+  only because the decoder now stops at what it doesn't understand. While it
+  merely skipped unknown bytes, consuming `FB` byte by byte landed on exactly
+  the same place: `cc` and `vv` are 7-bit MIDI data, so three skips of one add
+  up to the three bytes the event occupies. **The second fix was worth nothing
+  without the first**, which is not visible from either commit alone.
 
-## Contents
+  **And 28 tracks do not start with `F0 00`.** Their first block is missing —
+  dumps from the era when polled capture lost blocks, though it also shows up in
+  a later one. The serious part is that **only 18 of those 28 were failing**: the
+  other 10 decoded without complaint, misaligned, yielding 154 notes that are not
+  the track's. Checking the marker is a better test than waiting for an invalid
+  byte, because **the dangerous case is not the one that fails but the one that
+  doesn't**. All 28 are pattern tracks; of the 88 song tracks, none lacks it.
 
-| File | What it is |
-| Where | What it is |
-| --- | --- |
-| [`qy100-arp/`](qy100-arp/) | External arpeggiator and generative sequencer, over MIDI. [README](qy100-arp/README.md) |
-| [`qy100-syx/`](qy100-syx/) | Dumping, decoding and writing over SysEx. [README](qy100-syx/README.md) |
-| `Manuales/` · `manuales-md/` | Referenced throughout but **not included** — see the note at the top. Citations are by page number and still resolve against the real manuals |
+  **A third problem the first two hid: 17 tracks never reach `F2`.** Ten of them
+  already failed on an unknown event, but **7 were accepted in silence** — the
+  last block never arrived, and a truncated track is indistinguishable from a
+  short one. Only `decode_blocks` can catch this, because it is the only function
+  that receives the whole track; a lone block of a long track legitimately ends
+  mid-stream.
 
-```bash
-cd qy100-arp && .venv/bin/python test_engine.py      # tests, no hardware
-cd qy100-syx && .venv/bin/python test_protocol.py    # 175 checks — the last few
-                                                     # read dumps/, so the total
-                                                     # drops if those are absent
-cd qy100-syx && .venv/bin/python test_regresiones.py # checks the checks bite
-cd qy100-syx && .venv/bin/python test_generos.py     # 109 checks on the genre engines
-cd qy100-syx && .venv/bin/python medir_volcados.py   # recounts the cited figures
-```
+  State after the three corrections: **370 tracks decode whole, 28 are rejected
+  for the missing marker, and 17 for the missing end.**
 
-## The documents
+- **A song and pattern directory** in the `15 xx xx` address family, which we
+  have never used: it asks the device for a listing without dumping the content.
+- **The `.q1s` (song), `.q1a` and `.BLK` formats**, which we haven't touched.
+- **A region of the header the flash controller rewrites on every save**, around
+  offset 443, which cannot be derived from the pattern's content. It explains why
+  two saves of the same pattern are not identical.
 
-This file used to be 1,146 lines mixing three unrelated subjects. It is now the
-index; the detail lives one topic per file:
+**What we have and they don't**, in case it's worth handing back:
 
-| Document | What's in it |
-| --- | --- |
-| [`docs/qy100-protocolo.md`](docs/qy100-protocolo.md) | SysEx, pattern and song format, factory phrases, firmware |
-| *(not published)* | The studio inventory: what gear there is and on which channel. Personal information, of no use to a collaborator |
-| [`docs/estilos-de-fabrica.md`](docs/estilos-de-fabrica.md) | The 128 factory styles with their full names |
-| [`docs/musica-colombiana.md`](docs/musica-colombiana.md) | The measured rhythmic cells of each genre |
-| [`docs/manuales.md`](docs/manuales.md) | Where each manual is and how to read it |
-| *(not published)* | The plan for one particular live set. The memory measurements that came out of it are here, in the protocol document |
-| *(not published)* | Plugin inventory of one particular studio |
-
-## How certainty is marked
-
-**Nearly every mistake this project has made has lived on the border between
-what was measured and what was inferred**, and always for the same reason: a
-coherent inference sounds exactly like a fact. Hence the marks:
-
-```
-[M]  measured against the device or against a primary source
-[D]  deduced from something that is measured — coherent, unverified
-[V]  unverified, or checked by a route that doesn't prove it
-```
-
-The cases that illustrate it best, all real:
-
-- **The time-signature denominator** was declared absent after sweeping four
-  values of a three-bit field. Three values are valid and only one of them fell
-  inside the sweep. **A partial sweep does not prove an absence.**
-- **The DrumBrute's trigger parameter** was attributed to 102 because it was
-  first in the list and read 0. It's 105. A one-datum hypothesis.
-- **A file round-trip** was taken as proof that a program understood the format.
-  A program that doesn't understand it and merely copies it produces the same
-  result. **A round-trip only demonstrates comprehension if the output is
-  generated.**
-- **`451` control-change events turned out to be 10.** The count was of the byte
-  `0xFB` anywhere in the stream — padding, prefix and misaligned tracks
-  included — not of events reached by walking it. It carried a `[M]`, and it
-  was measured; it just measured a different quantity than the sentence around
-  it claimed. **A number is only as good as the question it answers**, so any
-  figure a document cites now has to come out of
-  [`medir_volcados.py`](qy100-syx/medir_volcados.py), which can be re-run.
-
-- **Three separate failures in one day had the same shape**: the time-signature
-  denominator, a loop that gained an empty bar from `max(note) + 1`, and the
-  mapalé measured in 4/4 when the transcription was written at half speed. None
-  was a bad measurement. All three were **correct arithmetic on the wrong
-  unit**, and no check caught them because the numbers were coherent inside a
-  false frame. The `451` above is the same animal. Before trusting a figure, ask
-  what unit it is in — not whether it is right.
-
-And a corollary about tests, learned when three decoder fixes turned out to
-share one suite that passed identically before and after all three: **a test
-that cannot fail is a comment.** [`test_regresiones.py`](qy100-syx/test_regresiones.py)
-puts each known defect back and requires that something goes red.
-
-And the method that does work when a measurement depends on someone else's ear:
-**ask for a comparison, not an absolute judgement.** Anyone can answer "is this
-the same sound?"; almost nobody can answer "is that an F or an F sharp?". The
-EP–40's pad map was solved that way after seven badly designed tests.
-
-## Rules that keep things from breaking
-
-All learned the hard way and detailed in the documents.
-
-**When writing to the QY100** ([protocol](docs/qy100-protocolo.md)):
-
-- The pattern goes **whole, and in the order the device dumped it** — tracks
-  first, the 5 header blocks last. Reordering it wipes the pattern.
-- Frame every write as `bulk mode ON → blocks → bulk mode OFF`. A loose block
-  hangs the device.
-- Every track starts with `F0 00`. Without it **the pattern sounds fine and
-  hangs the editor**.
-- `[V]` **`MIDI CONTROL` has nothing documented to do with SysEx.** This file
-  used to state `Off` to transfer and `In/Out` to play, as a rule; the manual
-  (p. 127) scopes that parameter to synchronised playback and never mentions
-  bulk dump, and a full pattern was written and read back on 2026-08-12 without
-  touching it. What the manual *does* require, and this file did not say, is
-  that the device be **in pattern play mode to receive pattern bulk data, and in
-  song play mode for song data** (p. 129).
-- **Never send MIDI while someone is using the front panel.** It hangs.
-- **Verify by re-reading and decoding events**, never by comparing bytes: the
-  device re-serialises and returns 95 of 147 bytes different for the same data.
-- Don't send `CLEAR` unless asked.
-
-**In general, and this repeats across the whole rig**: a write reported as
-successful proves nothing. The MOTU swallows writes silently, the QY100 ignores
-them while playing, and the Minitaur's editor shows a list that may not be the
-device's. **The only thing that proves state is reading it back.**
-
-**And before blaming a device, look at both ends of every cable.** MIDI is two
-independent cables and one can be right while the other is wrong — notes played
-fine for a whole afternoon while nothing came back, and `HOST SELECT`,
-`MIDI CONTROL`, `MIDI FILTER`, the device mode, two interfaces and all sixteen
-device numbers were checked before anyone looked at where the return cable was
-plugged. **A link that works in one direction is not a link that works.**
-
-The next cheapest check is power-cycling the interface, and after that asking
-for `dump setup`: if it answers, the device and both cables are fine.
-
-## Language
-
-The owner's manual is in Spanish and the service manual in English, so
-terminology appears in both. When quoting the owner's manual, keep the Spanish
-term and gloss it — **the physical buttons are labelled in English**.
-
-Documents that are published are written in English at the source, so that no
-translation layer has to be maintained. `docs/equipo.md` and `PLAN-LIVESET.md`
-stay in Spanish because they are never published.
-
-## External resource
-
-[QY100 Explorer](https://qy100.doffu.net/) — an active QY100/QY70 community. It
-confirms that the productive route is **the data, not the firmware**: they get
-out-of-range BPM and patterns above the cap by writing style files.
-
-## Licence
-
-Code is [MIT](LICENSE); the prose documentation is
-[CC BY 4.0](LICENSE-DOCS). Third-party material — Yamaha's tables and marks,
-qyTools' cited datasheet, TRIBE Player's note map — is identified in
-[NOTICE](NOTICE) rather than folded into either.
-
-The split is deliberate. MIT keeps the code frictionless, and specifically
-lets the other people working on this device incorporate it into their own
-projects: qyTools is AGPLv3, and MIT flows into that direction while the
-reverse would not. CC BY covers the documentation because the measurements
-and how they were established are the actual work, and attribution is the
-only thing asked back.
-
-**A licence covers expression, not facts.** A byte offset, a note number, how
-many bars repeat a cell — those belong to nobody and can be used freely.
-
-The project's public repository lives at
-[`qy100-toolkit`](https://github.com/afbecerra7-netizen/qy100-toolkit) and is
-synced with `sincronizar-publico.py`.
+- **The mixer broken out.** They group bytes 85–511 as "per-track parameter
+  data"; we have program at 154, drum flag at 162, volume at 170, pan at 178,
+  chorus at 194, reverb at 202 and variation at 210, measured one at a time.
+- **`CURRENT CHORD` is per section**, roots at 117–122 and types at 123–128, with
+  the 27 types measured.
+- **The preset-phrase reference format** — `(category << 3) | state` in the flag
+  table — with the category table pulled out of the firmware. It is what lets a
+  style reference factory material without spending memory.
+- **The 32-measure unlock verified by writing it**, not just by loading doffu's
+  file.
+- **The memory arithmetic**: 128 bytes per block against 128 KB of SRAM,
+  confirmed by two independent routes.

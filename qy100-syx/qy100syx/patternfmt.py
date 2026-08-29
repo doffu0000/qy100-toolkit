@@ -101,6 +101,20 @@ def pack(data, size=BLOCK_BYTES) -> bytes:
 # reales, asi que se saltan en vez de inventarles significado.
 
 END_OF_TRACK = 0xF2
+TRACK_MARKER = b"\xf0\x00"   # toda pista arranca asi; sin esto el editor cuelga
+CONTROL_CHANGE = 0xFB         # `FB cc vv` — 3 bytes.
+#
+# **Medido** con `medir_volcados.py`, que es de donde tiene que salir cualquier
+# cifra de estas: **10 eventos**, todos con `cc = 64` (pedal de sostenido),
+# repartidos en 8 pistas, con valores 0 (seis veces) y 127 (cuatro). Alguien
+# grabo tocando con pedal, pero es UNA grabacion, no una costumbre.
+#
+# La cifra que estuvo publicada aqui —451 apariciones, 438 con cc=64 y 13 con
+# cc=71— **contaba el byte `0xFB` en cualquier posicion del flujo**: relleno
+# posterior al `F2`, prefijo de 26 bytes y pistas desalineadas incluidas. Hoy ese
+# recuento crudo da 362. Es otra magnitud, no una version imprecisa de esta: un
+# byte suelto que vale 0xFB no es un evento, y `cc = 71` no aparece ni una vez
+# cuando el flujo se recorre alineado.
 
 
 class Note:
@@ -119,7 +133,7 @@ class Note:
                 (o.pitch, o.velocity, o.gate, o.time))
 
 
-def decode_track(payload, start=EVENT_STREAM_START, max_events=512):
+def decode_track(payload, start=EVENT_STREAM_START, max_events=512, estricto=True):
     """Decodifica una pista de UN bloque. Devuelve (notas, duracion_en_relojes).
 
     `payload` son los 147 bytes crudos del bloque; el desempaquetado se hace
@@ -129,10 +143,10 @@ def decode_track(payload, start=EVENT_STREAM_START, max_events=512):
     Para una pista que ocupe varios bloques usa `decode_blocks`: aqui el flujo
     se corta en el borde del bloque y se pierden los eventos siguientes.
     """
-    return decode_events(unpack(payload), start, max_events)
+    return decode_events(unpack(payload), start, max_events, estricto)
 
 
-def decode_blocks(payloads, start=EVENT_STREAM_START, max_events=4096):
+def decode_blocks(payloads, start=EVENT_STREAM_START, max_events=4096, estricto=True):
     """Decodifica una pista repartida en varios bloques.
 
     **Verificado**: solo el PRIMER bloque lleva el prefijo de 26 bytes. Los
@@ -146,24 +160,74 @@ def decode_blocks(payloads, start=EVENT_STREAM_START, max_events=4096):
     if not trozos:
         return [], 0
     flujo = trozos[0][start:] + b"".join(trozos[1:])
-    return decode_events(flujo, 0, max_events)
+    # **Toda pista empieza por `F0 00`.** Si no, este no es el primer bloque:
+    # falta el que lleva el prefijo, y quitar 26 bytes cae a mitad de un evento.
+    # Es mejor comprobacion que esperar a un byte invalido — de las 28 pistas sin
+    # marcador en nuestros volcados, 18 acababan fallando y **10 se decodificaban
+    # sin quejarse**, sacando 154 notas inventadas. Esas 10 son el caso
+    # peligroso. Cifras de `medir_volcados.py`.
+    if estricto and flujo[:2] != TRACK_MARKER:
+        raise ValueError(
+            "la pista no empieza por F0 00 (empieza por %s). Falta su primer "
+            "bloque: el volcado perdio datos, o estos bloques son continuacion "
+            "de otra cosa. Con estricto=False se lee igualmente, pero el "
+            "resultado no es fiable." % flujo[:2].hex(" "))
+    notas, t, fin = decode_events(flujo, 0, max_events, estricto, con_fin=True)
+    # **Aqui llega la pista ENTERA, asi que tiene que acabar en `F2`.** Si el
+    # flujo se agota antes, faltan bloques del final igual que antes faltaban los
+    # del principio, y el resultado es una pista cortada que no se distingue de
+    # una corta. `decode_track` no puede comprobarlo —un bloque suelto de una
+    # pista larga acaba a media pista y eso es normal—, pero aqui si.
+    #
+    # Caza 7 pistas de los volcados que se aceptaban calladas. Las otras 10 que
+    # tampoco llegan a `F2` ya fallaban por evento desconocido.
+    if estricto and not fin:
+        raise ValueError(
+            "la pista no acaba en F2: el flujo se agoto tras %d evento(s) de "
+            "nota y %d relojes. Faltan bloques del final, o los que hay no "
+            "vienen en el orden en que los mando el equipo. Con estricto=False "
+            "se devuelve lo leido hasta aqui." % (len(notas), t))
+    return notas, t
 
 
-def decode_events(d, start=EVENT_STREAM_START, max_events=512):
+def decode_events(d, start=EVENT_STREAM_START, max_events=512, estricto=True,
+                  con_fin=False):
     """Recorre un flujo YA desempaquetado. Devuelve (notas, relojes_totales).
+
+    Con `con_fin=True` devuelve `(notas, relojes, llego_al_final)`, donde el
+    tercero dice si se encontro el `F2` o si el flujo simplemente se acabo. Los
+    dos casos son indistinguibles en el resultado y no lo son en significado:
+    quien tenga la pista entera —`decode_blocks`— debe exigir el `F2`.
 
     Comprueba que cada evento quepa entero antes de leerlo: un evento partido
     por el final del buffer solia reventar con IndexError.
+
+    **Solo entiende notas y tiempos, y eso es una limitacion real.** El flujo
+    admite ademas control change, aftertouch, RPN/NRPN, program change, bank
+    select, pitch bend y cambio de voz a mitad de pista — documentados en la
+    hoja de datos de qyTools, no aqui. Ante un byte que no reconoce este
+    decodificador avanza uno y sigue, asi que **una pista con cualquiera de esos
+    eventos se desincroniza en silencio**: las notas posteriores salen con la
+    altura y el tiempo equivocados, sin error y sin señal.
+
+    No ha mordido todavia porque todo lo decodificado han sido pistas de notas,
+    grabadas o generadas por nosotros. Muerde en cuanto se lea una pista que
+    alguien haya tocado con rueda de modulacion o pedal.
     """
     i, t = start, 0
-    notas = []
+    notas, desconocidos, fin = [], [], False
     for _ in range(max_events):
         if i >= len(d):
             break
         s = d[i]
-        # un evento truncado al final del buffer no es un evento
+        # Un evento truncado al final del buffer no es un evento. **Los anchos
+        # de aqui tienen que ser los mismos que consume el cuerpo del bucle**:
+        # esta tabla decia 1 para todo lo que pasara de 0xF0, cuando `F0`
+        # consume 2 y `FB` consume 3, y asi la guardia no protegia justamente los
+        # dos eventos que no son notas.
         ancho = (1 if s < 0xA0 else 2 if s < 0xC0 else
-                 3 if s < 0xD0 else 4 if s < 0xE0 else 5 if s < 0xF0 else 1)
+                 3 if s < 0xD0 else 4 if s < 0xE0 else 5 if s < 0xF0 else
+                 2 if s == 0xF0 else 3 if s == CONTROL_CHANGE else 1)
         if i + ancho > len(d):
             break
         if 0x80 <= s <= 0x9F:                       # tiempo corto, 1 byte
@@ -183,12 +247,29 @@ def decode_events(d, start=EVENT_STREAM_START, max_events=512):
                               ((s & 0x0F) << 14) | (d[i + 1] << 7) | d[i + 2], t))
             i += 5
         elif s == END_OF_TRACK:
+            fin = True
             break
         elif s == 0xF0:                             # marcador, no avanza el tiempo
             i += 2
+        elif s == CONTROL_CHANGE:                   # control change, 3 bytes
+            # No se guarda, pero **hay que consumirlo entero**: saltarlo como un
+            # byte desalinea todo lo que venga detras.
+            i += 3
         else:
-            i += 1                                  # estado no identificado
-    return notas, t
+            # **Un estado desconocido no se salta.** Avanzar un byte y seguir
+            # deja el flujo desalineado, y a partir de ahi las notas salen con
+            # la altura y el tiempo equivocados sin que nada lo delate. Es
+            # preferible parar y decir donde.
+            desconocidos.append((i, s))
+            if estricto:
+                raise ValueError(
+                    "evento no reconocido 0x%02X en el byte %d. El flujo admite "
+                    "control change, aftertouch, pitch bend y cambio de voz, que "
+                    "este decodificador no entiende; saltarlos desalinea todo lo "
+                    "que venga despues. Usa estricto=False para leer solo hasta "
+                    "aqui." % (s, i))
+            break
+    return (notas, t, fin) if con_fin else (notas, t)
 
 
 def encode_track(notas, total_clocks, start=EVENT_STREAM_START, prefix=None):
@@ -240,7 +321,11 @@ def _delta_bytes(delta: int) -> bytes:
 PAD_BYTE = 0x40         # con lo que el QY100 rellena la cola del ultimo bloque
 
 
-MARCADOR_INICIO = bytes([0xF0, 0x00])
+# Mismo valor que `TRACK_MARKER`, que es el que se comprueba al leer.
+# Estuvieron declarados por separado a 200 lineas de distancia, uno para
+# escribir y otro para leer: dos definiciones de la misma cosa que podian
+# separarse sin que nada fallara.
+MARCADOR_INICIO = TRACK_MARKER
 """Evento con el que arranca el flujo de TODA pista grabada en el equipo.
 
 Verificado en las tres pistas que grabo el propio QY100: la de Intro vacia
@@ -302,12 +387,11 @@ def encode_blocks(notas, total_clocks, prefix, start=EVENT_STREAM_START):
       - el desempaquetado 7->8 es POR BLOQUE (se descartan 5 bits en cada uno),
         no continuo a lo largo de la pista
 
-    **Limitacion: solo se reproducen notas y tiempos.** El flujo real del equipo
-    trae ademas un marcador `F0 xx` por pista que aqui no se genera, asi que
-    re-codificar una pista existente lo pierde. Para generar desde cero da igual
-    —el arpegio escrito el 2026-07-29 sonaba sin ningun `F0`—, pero para un
-    ida y vuelta fiel todavia no sirve. Por eso los bytes salen distintos a los
-    del equipo aunque las notas se relean identicas.
+    **Limitacion: solo se reproducen notas y tiempos.** El marcador `F0 00` si
+    se genera —lo pone `_event_stream`—, pero el flujo real del equipo trae
+    ademas control change y otros eventos que aqui no se reconstruyen, asi que
+    re-codificar una pista existente los pierde. Por eso los bytes salen
+    distintos a los del equipo aunque las notas se relean identicas.
     """
     flujo = bytearray(_event_stream(notas, total_clocks, prefix, start))
     flujo += bytes([PAD_BYTE]) * ((-len(flujo)) % UNPACKED_BYTES)
@@ -484,17 +568,36 @@ def decode_registry(header_payloads):
 def set_registry(header_payloads, por_seccion):
     """Reescribe el registro. `por_seccion` es {seccion: [pistas]}.
 
+    **Solo pisa lo que es nuestro.** Una ranura cuyo nibble bajo no sea `8`
+    (contenido propio) ni `E` (vacia) esta en un estado que no escribimos
+    nosotros —hoy, una frase preset referenciada, cuyo nibble bajo lleva el beat—
+    y se deja intacta junto con su byte de la segunda tabla.
+
+    Sin esto, escribir una sola pista generativa borra en silencio todas las
+    frases de fabrica que hubiera asignadas desde el panel: la version anterior
+    ponia `F8`/`FE` y el `tr` en las 48 ranuras sin mirar lo que habia. La
+    escritura "funciona", no da error, y las frases desaparecen.
+
+    La regla es conservadora a proposito: **se preserva todo lo que no
+    reconocemos**, no solo los valores de referencia medidos. Del beat solo
+    tenemos dos de los tres nibbles, y no vamos a borrar datos por no haber
+    medido el tercero.
+
     Devuelve los 5 bloques de la cabecera.
     """
     d = bytearray(b"".join(unpack(p) for p in header_payloads))
     for sec in range(len(SECTIONS)):
         pistas = set(por_seccion.get(sec, []))
         for k in range(REGISTRY_SLOTS):
-            hay = k in pistas
-            d[REGISTRY_FLAGS_OFF + sec * REGISTRY_SLOTS + k] = (
-                FLAG_PRESENTE if hay else FLAG_VACIA)
-            d[REGISTRY_OFF + sec * REGISTRY_SLOTS + k] = (
-                sec * TRACKS_PER_SECTION + k) if hay else 0
+            i_flag = REGISTRY_FLAGS_OFF + sec * REGISTRY_SLOTS + k
+            i_tr = REGISTRY_OFF + sec * REGISTRY_SLOTS + k
+            if k in pistas:
+                d[i_flag] = FLAG_PRESENTE
+                d[i_tr] = sec * TRACKS_PER_SECTION + k
+            elif d[i_flag] in (FLAG_PRESENTE, FLAG_VACIA):
+                d[i_flag] = FLAG_VACIA
+                d[i_tr] = 0
+            # else: estado ajeno (frase preset referenciada) -> no se toca
     return [pack(bytes(d[i:i + UNPACKED_BYTES]))
             for i in range(0, len(d), UNPACKED_BYTES)]
 
@@ -1064,6 +1167,150 @@ def build_prefix(base=None, nombre=None, compases=None, voz=None,
     return bytes(d)
 
 
+def negras_por_compas(numerador, denominador):
+    """Negras que dura un compas. `6/8` son 3, `8/16` son 2, `4/4` son 4.
+
+    **La formula es `num * 4 / den`, no `num` o `num // 2`.** Se venia usando
+    `num if den == 4 else num // 2`, que acierta en /4 y en los /8 de numerador
+    par —o sea en 6/8 y 12/8, que es todo lo que producen los motores hoy— y
+    falla en las otras doce signaturas que el aparato admite. Un `8/16` salia
+    con 4 negras en vez de 2: **la pista se escribia el doble de larga que su
+    seccion**, y `16/16`, que es 4/4 exacto, se rechazaba.
+
+    Se niega cuando no da un numero entero de negras, porque `section_clocks`
+    trabaja en negras enteras: un `7/8` son 3,5 y no se puede representar. Antes
+    se redondeaba en silencio a 3.
+    """
+    if denominador not in (4, 8, 16):
+        raise ValueError("denominador %r fuera de /4, /8 y /16" % denominador)
+    negras4 = numerador * 4
+    if negras4 % denominador:
+        raise ValueError(
+            "%d/%d son %.2f negras por compas y no un numero entero; el patron "
+            "se mide en negras enteras" % (numerador, denominador,
+                                           negras4 / float(denominador)))
+    return negras4 // denominador
+
+
 def section_clocks(measures, beats_per_bar=4):
     """Relojes que dura una seccion de `measures` compases."""
     return measures * beats_per_bar * CLOCKS_PER_QUARTER
+
+
+
+# Los 5 bloques de cabecera de un patron VACIO, capturados del equipo con el
+# registro puesto a cero. Existen porque **un patron vacio no devuelve nada**:
+# ni una pista, ni la cabecera. Sin esto, cualquier herramienta que quiera crear
+# un patron desde cero no tiene de donde leer, y hay que ir al panel a grabar
+# una nota antes de poder escribir nada — cosa que bloqueo al generador de
+# estilos dos veces antes de resolverlo asi.
+#
+# Como `PREFIJO_BASE`, es una captura literal y no una plantilla inventada: los
+# bytes que todavia no sabemos leer vienen del QY100. Lo unico puesto a mano es
+# el registro, que si sabemos escribir.
+CABECERA_BASE = [bytes.fromhex(h) for h in (
+    # bloque 0
+    "022c00000000002010080402010040200e002010080000017f3f5f6f777b7d7e7f3f"
+    "5f6f777b7d7e7f3f5f6f777b7d7e7f3f5f6f777b7d7e7f3f5f6f777b7d7e7f3f5f6f"
+    "777b7d7e7f3f5f6f777b7c0000000000000000000000000000000000000000000000"
+    "00000000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000",
+    # bloque 1
+    "000301406030180c000000077b7d7e00000000000000000000000000000000000008"
+    "000000000001004020000000000032190c4623114864321008040201004020100f77"
+    "7b7d7e7f3f5f6f70000000000000000001205028140a050241200000000000000000"
+    "00402010080402010040201008040201004020100804020100402010080402010040"
+    "2010080402010040201000",
+    # bloque 2
+    "20100824120904422110482778010040201008040201004020100804020100402a5a"
+    "2f776b7d7e553f5e4f762b3960532c174804020100402010080402011a4d26484562"
+    "737d7e203f4804077b7d7e7f100804077b7d7e7f3f5f6f777b7d7e7f3f5f6f777b7d"
+    "7e7f3f50080402010040201008040201004020100804020100402010080402010040"
+    "2010080402010040201000",
+    # bloque 3
+    "20100804020100402010080402000a0006412068184e101344000920000000000000"
+    "00000000006432190c462311486432190c4623114864320000000000000000001f6f"
+    "777b7d7e7f3f5f6f777b7d7e7f3f5f6f777b7d7e7f3f5f6f777b7d7e7f3f5f6f777b"
+    "7d7e7f3f5f6f777b7d7e7f3f5f6f777b7d7e7f3f5f6f777b7d7e7f3f5f6f777b7d7e"
+    "7f3f5f6f777b7d7e7f3f40",
+    # bloque 4
+    "7f3f5f6f777b7d7e7f3f5f6f777b7d7e7f3f5f6f777b7d7e7f3f5f6f777800000000"
+    "0000000000001e7f5f6f777b7d7e0025200a7802757e7f3f5f6f777b7d7e7f3f5f6f"
+    "777b7d7e7f3f5f6f777b7d7e7f3f5f6f700676006c7f5f6f777b7d7e004940134005"
+    "0f7e7f3f5f6f777b7d7e7f3f5f6f777b7d7e7f3f5f6f777b7d7e7f3f5f6f70070200"
+    "103f5f6f77780156005600",
+)]
+
+
+
+# --- Referencia a frase, en el registro de la cabecera -------------------
+#
+# La bandera del registro **no se parte en dos nibbles**, aunque lo pareciera
+# durante toda una tarde de mediciones: son **5 bits de categoria y 3 de
+# estado**.
+#
+#     bandera = (indice_de_categoria << 3) | estado
+#
+#     estado 0        la pista tiene contenido propio
+#     estado 1        frase preset, 16 beat
+#     estado 2        frase preset, 8 beat
+#     estado 3        frase preset, 3/4 beat
+#     estado 6        vacia
+#
+# Y el numero de frase menos uno va en la **segunda tabla** del registro (bytes
+# 69-116), la misma que guarda el `tr` cuando la pista tiene contenido propio.
+# Esta sobrecargada segun el estado.
+#
+# Asi `F8` y `FE` encajan sin ser casos especiales: son la categoria `US` (31)
+# con estado 0 y 6 — una frase de **usuario** con contenido o vacia.
+#
+# La tabla sale del **firmware**, offset 0x11AE24 de la imagen que produce
+# `extraer_rom.py`, y los `__` son huecos reservados por Yamaha. Cuadra con las
+# ocho banderas medidas en el equipo, 8 de 8.
+#
+# **Por que costo tanto**: se asumio una particion 4+4 y se barrio el nibble
+# alto. Con el bajo fijo en 9, el indice resultante es `(k<<1)|1` — **solo los
+# impares**, la mitad de la tabla. Las ocho categorias que "no existian" estaban
+# todas en indices pares. El barrido no podia alcanzarlas y el resultado se leyo
+# como que el formato no llegaba. Misma trampa que la del denominador de compas:
+# **un barrido que no cubre el rango entero no prueba una ausencia.**
+CATEGORIAS_FRASE = ['--', 'Da', 'Db', '__', '__', 'Fa', 'Fb', '__', '__', 'PC', '__', '__', '__', 'Ba', 'Bb', '__', '__', '__', 'Ga', 'Gb', 'GR', '__', '__', 'KC', 'KR', '__', '__', '__', 'PD', 'BR', 'SE', 'US']
+
+FRASE_ESTADO_PROPIO = 0
+FRASE_ESTADO_16BEAT = 1
+FRASE_ESTADO_8BEAT = 2
+FRASE_ESTADO_34BEAT = 3
+FRASE_ESTADO_VACIA = 6
+
+BEATS_FRASE = {"16 beat": FRASE_ESTADO_16BEAT,
+               "8 beat": FRASE_ESTADO_8BEAT,
+               "3/4 beat": FRASE_ESTADO_34BEAT}
+
+
+def indice_categoria(codigo):
+    """`Da` -> 1. Levanta ValueError si el codigo no existe."""
+    for k, c in enumerate(CATEGORIAS_FRASE):
+        if c == codigo:
+            return k
+    raise ValueError("categoria desconocida: %r. Validas: %s"
+                     % (codigo, " ".join(sorted(c for c in CATEGORIAS_FRASE
+                                                 if c not in ("__", "--")))))
+
+
+def bandera_frase(categoria, beat):
+    """Bandera de registro para referenciar una frase preset."""
+    if beat not in BEATS_FRASE:
+        raise ValueError("beat desconocido: %r. Validos: %s"
+                         % (beat, ", ".join(sorted(BEATS_FRASE))))
+    return (indice_categoria(categoria) << 3) | BEATS_FRASE[beat]
+
+
+def leer_bandera(b):
+    """Devuelve (categoria, estado). `estado` es el nombre del beat si aplica."""
+    cat = CATEGORIAS_FRASE[b >> 3]
+    estado = b & 0x7
+    nombre = {v: k for k, v in BEATS_FRASE.items()}.get(estado)
+    if nombre is None:
+        nombre = {FRASE_ESTADO_PROPIO: "propio",
+                  FRASE_ESTADO_VACIA: "vacia"}.get(estado, "?%d" % estado)
+    return cat, nombre
