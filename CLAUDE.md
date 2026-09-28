@@ -543,6 +543,7 @@ index; the detail lives one topic per file:
 | Document | What's in it |
 | --- | --- |
 | [`docs/qy100-protocolo.md`](docs/qy100-protocolo.md) | SysEx, pattern and song format, factory phrases, firmware |
+| [`docs/performance-shaping.md`](docs/performance-shaping.md) | Cleaning a MIDI file before it becomes a song (redundant data, setup placement, GS/GM2 drum remap), and adding performance detail: curves inside notes, velocity and timing feel, trills, slurs, strums, echo |
 | [`docs/xg-remote-control.md`](docs/xg-remote-control.md) | The XG tone generator over MIDI: Parameter Change, Bulk Dump, Dump and Parameter Request, controller equivalents, and the earlier live captures decoded |
 | *(not published)* | The studio inventory: what gear there is and on which channel. Personal information, of no use to a collaborator |
 | [`docs/estilos-de-fabrica.md`](docs/estilos-de-fabrica.md) | The 128 factory styles with their full names |
