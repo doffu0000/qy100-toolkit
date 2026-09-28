@@ -514,6 +514,8 @@ Worth being cautious about: **adjacent addresses aren't reliably related paramet
 
 Also worth noting for anyone repeating this kind of live capture: **`MIDI CONTROL` gates transmission entirely** (nothing arrives with it `Off`, confirmed by testing a note-on with `MIDI CONTROL` toggled — even basic Note On/Off was silent until it was set to `In/Out`), and **a MIDI port handle can go stale after a physical cable reconnect** even though the port's name stays identical — restart the listener process after any physical reconnect, don't just trust that "same name" means "same live connection." Both cost real time chasing false negatives before the effect-type discovery.
 
+**The whole XG family, and what the captures above really are** (2026-09-27): [`docs/xg-remote-control.md`](docs/xg-remote-control.md). The Data List does document this protocol after all (pp. 43, 49 to 50, 58 to 62), including three message types never used here yet: XG Bulk Dump (a whole block in one checksummed message), Dump Request and Parameter Request (reading the device's current values back). Read through the XG address tables, every capture above has a name `[D]`: `02 01 40` is Variation Type, `42` to `4A` are Variation Parameters 1 to 5 (two bytes each, hence the +2 layout), `58`/`59` are Send Variation to Reverb/Chorus, and `02 01 5A` is Variation Connection, a two-value switch, which is why `7F` did nothing. The Undo burst's `00 00 7E` is XG System On, `00 00 7D` Drum Setup Reset, `08 0N 11` Dry Level and `08 0N 23` Bend Pitch Control. The document also covers the CC/NRPN/RPN equivalents of the per-part and drum parameters ([`xg_controller_equivalents.json`](qy100-remote-transmission-mapping/xg_controller_equivalents.json)), using a Parameter Request as a ready handshake, and following playback from MIDI Out. Almost all of it is `[V]` on the hardware; the document ends with the order to test it in.
+
 ## Contents
 
 | File | What it is |
@@ -541,6 +543,7 @@ index; the detail lives one topic per file:
 | Document | What's in it |
 | --- | --- |
 | [`docs/qy100-protocolo.md`](docs/qy100-protocolo.md) | SysEx, pattern and song format, factory phrases, firmware |
+| [`docs/xg-remote-control.md`](docs/xg-remote-control.md) | The XG tone generator over MIDI: Parameter Change, Bulk Dump, Dump and Parameter Request, controller equivalents, and the earlier live captures decoded |
 | *(not published)* | The studio inventory: what gear there is and on which channel. Personal information, of no use to a collaborator |
 | [`docs/estilos-de-fabrica.md`](docs/estilos-de-fabrica.md) | The 128 factory styles with their full names |
 | [`docs/musica-colombiana.md`](docs/musica-colombiana.md) | The measured rhythmic cells of each genre |
