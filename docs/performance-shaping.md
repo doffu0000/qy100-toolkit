@@ -141,28 +141,109 @@ note lets a bend be in place when the note starts.
 
 ```
 y = f1( f2(x·a) · b ) · f3(x·c)        x runs 0..1 across the covered span
-f1, f2, f3 ∈ { sin, cos, x², exp(−x), linear },  each optional
 ```
 
-`f1` alone gives a plain shape (a sine vibrato, a linear ramp). `f3` is an
-envelope on it: `sin(x·a) · x²` is a vibrato that grows in, `· exp(−x)` one that
-dies away. `f2` inside `f1` bends time itself, so `cos(x²·a)` is a vibrato that
-speeds up. Then scale the result into the output range (for bend, in semitones
-converted through the channel's bend range; for CCs, 0 to 127), or clip it to
-the range instead of scaling. Flip it vertically or horizontally, or fold the
-negative half up (abs), to get the other variants.
+Each `f` is optional and is one of seven shapes, all defined so that one unit
+of input is one full cycle or one full sweep:
 
-**How dense.** Two knobs keep the data sane: an **interval** between events (a
-few ticks), and a **minimum difference**: skip an event whose value differs
-from the last one sent by less than a threshold. Together they put events where
-the curve moves and nowhere else. This matters twice over on the QY100, where
-every event is song memory: an unthinned vibrato on every long note of a solo
-can add more events than the notes themselves.
+| Shape | Definition | Over 0..1 |
+| --- | --- | --- |
+| Linear | `x` | ramp 0 to 1 |
+| Sin | `sin(2πx)` | one full cycle |
+| Cos | `cos(2πx)` | one full cycle, starting at the top |
+| Exp | `(e^(1−x) − 1) / (e − 1)` | exponential decay from exactly 1 to exactly 0 |
+| Square | `x²` | slow start, fast finish |
+| Saw up | `x − ⌊x⌋` | repeats every unit, so `x·a` with `a = 4` gives four ramps |
+| Saw down | `1 − (x − ⌊x⌋)` | the same, falling |
+
+The Exp normalisation matters: plain `exp(−x)` only falls to 0.37 over the
+span, which leaves a fade that never finishes. The coefficients `a` and `c` are
+repetition counts: `sin(2π·x·6)` is six vibrato cycles across the span, whatever
+its length. Coefficients from 0.1 to 5 in steps of 0.1 cover every recipe below.
+
+How the pieces combine:
+
+- `f1` alone gives a plain shape.
+- `f3` multiplies it as an envelope. `sin · x²` is a vibrato that grows in,
+  `sin · Exp` one that dies away.
+- `f2` inside `f1` bends time: its output, times `b`, becomes `f1`'s input. With
+  `f2 = x²` and `f1 = cos`, the cycles get closer together towards the end, a
+  vibrato that speeds up. If `f2` is off, `f1` takes `x·a` directly.
+- Then, in this order: optionally fold negative values up (`abs`), optionally
+  flip vertically (`−y`), optionally flip horizontally (read the result
+  backwards).
+
+**Mapping onto the output range.** Sample the result at 256 evenly spaced
+points and keep the largest absolute value, the peak. Then either:
+
+- **Scale:** map `−peak .. +peak` linearly onto `min .. max`. **Zero lands in
+  the middle of the range.** A cosine vibrato scaled to 0 to 3 semitones swings
+  around 1.5, which is what makes it upward-only; a curve that is never negative
+  (Square, Exp, the saws) only ever reaches the upper half of the range unless it
+  is shifted first.
+- **Clip:** use the value as it is (on a ±127 scale) and clamp it to
+  `min .. max`. Useful when part of the curve should sit flat against a limit.
+
+An event at a given position takes the nearest sample at or below it (no
+interpolation). 256 steps is finer than any MIDI value can show over a note, so
+nothing is lost.
+
+**How dense.** Walk the span from its start in steps of the **interval** (a few
+ticks), compute the value at each step, and emit an event only if it differs
+from the **last emitted** value by at least the **minimum difference**.
+Comparing against the last emitted value, not the previous step, is what stops
+a slow curve from being dropped entirely. Then clean up the result: clamp
+negative times to 0, sort by time, drop any event that repeats the previous
+value of the same kind, and keep only the first of several events on the same
+tick. Together these put events where the curve moves and nowhere else. This
+matters twice over on the QY100, where every event is song memory: an
+unthinned vibrato on every long note of a solo can add more events than the
+notes themselves.
+
+For a parameter reached by NRPN, send the address (CC 99, CC 98) once at the
+start of the span, only Data Entry (CC 6) per step, and the null RPN
+(CC 101 = 127, CC 100 = 127) after the last one.
 
 **Clean edges.** Optionally write a value at the start (a pre-event) and reset
-to neutral after the note (a post-event, bend back to 0, CC 11 back to 127), so
-the next note does not inherit a bent pitch. Before adding, delete existing
-events of the same kind in the span so two passes don't fight.
+to neutral just before the next note (a post-event: bend back to 0, CC 11 back
+to 127), so the next note does not inherit a bent pitch. Before adding, delete
+existing events of the same kind in the span so two passes don't fight.
+
+A reference implementation of the curve, 30 lines of Python:
+
+```python
+import math
+
+E = math.e
+SHAPES = {
+    "linear":   lambda x: x,
+    "sin":      lambda x: math.sin(2 * math.pi * x),
+    "cos":      lambda x: math.cos(2 * math.pi * x),
+    "exp":      lambda x: (math.exp(1 - x) - 1) / (E - 1),
+    "square":   lambda x: x * x,
+    "saw_up":   lambda x: x - math.floor(x),
+    "saw_down": lambda x: 1 - (x - math.floor(x)),
+}
+
+def curve(f1, a=1.0, f2=None, b=1.0, f3=None, c=1.0,
+          fold=False, flip_y=False, flip_x=False, n=256):
+    ys = []
+    for i in range(n):
+        x = i / (n - 1)
+        y = SHAPES[f1](SHAPES[f2](x * a) * b) if f2 else SHAPES[f1](x * a)
+        if f3:
+            y *= SHAPES[f3](x * c)
+        if fold and y < 0:
+            y = -y
+        if flip_y:
+            y = -y
+        ys.append(y)
+    return ys[::-1] if flip_x else ys
+
+def scale(ys, lo, hi):
+    peak = max(abs(y) for y in ys) or 1.0
+    return [lo + (y / peak + 1) * (hi - lo) / 2 for y in ys]
+```
 
 Working recipes, as starting points:
 
@@ -188,7 +269,13 @@ Replace or offset velocity with a function of something musical:
 - **position in the bar** (accents: a sawtooth `1 − frac(x)` over the beat
   gives strong downbeats, 64 to 120 is a usable range),
 - **pitch** (brighter high notes, or the reverse),
-- **time across the selection** (crescendo, decrescendo, fade out).
+- **time across the selection** (crescendo, decrescendo, fade out),
+- **the note's length** (longer notes played harder, as a player leans into
+  them),
+- **the interval from the previous note**, signed or unsigned (leaps accented,
+  steps relaxed; or rising lines louder than falling ones),
+- **the original velocity itself** (compress or expand the dynamic range
+  without flattening it).
 
 Offering both "add to the existing velocity" and "replace it" keeps the
 original phrasing when that matters.
