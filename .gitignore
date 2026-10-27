@@ -12,3 +12,9 @@ dumps/*
 !dumps/3*.syx
 !dumps/41-duracion.syx
 !dumps/53-escrito-72.syx
+
+# Yamaha firmware image and anything decoded from it, never publish
+QY100_1.37/
+
+# Pattern backups written by set_measures.py (personal data)
+qy100-syx/dumps/pattern*-*.syx
